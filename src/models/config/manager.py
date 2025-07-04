@@ -45,32 +45,38 @@ class ConfigManager(ManualConfig):
         reader.read(path, encoding="UTF-8")
         field_types = {f.name: f.type for f in fields(ConfigSchema)}
         errors = []
+        unknown_fields = {}  # 原样保留未知字段
         for section in reader.sections():
             for key, value in reader.items(section):
-                if key not in field_types:
-                    # 特例处理: 支持自定义网站配置
-                    if key.endswith("_website") and key[:-8] in ManualConfig.SUPPORTED_WEBSITES and value:
-                        setattr(self.config, key, value)
+                try:
+                    if key not in field_types:
+                        # 特例处理: 支持自定义网站配置
+                        if key.endswith("_website") and key[:-8] in ManualConfig.SUPPORTED_WEBSITES and value:
+                            setattr(self.config, key, value)
+                            continue
+                        unknown_fields[key] = value
+                        errors.append(f"未知配置: {key} (位于 {section})")
                         continue
-                    errors.append(f"未知配置: {key} (位于 {section})")
-                    continue
-                expected_type = field_types[key]
-                if expected_type is int:
-                    try:
-                        setattr(self.config, key, int(value))
-                    except ValueError:
-                        errors.append(f"类型无效: {key} 应为整数, 得到 {value} (位于 {section})")
-                elif expected_type is float:
-                    try:
-                        setattr(self.config, key, float(value))
-                    except ValueError:
-                        errors.append(f"类型无效: {key} 应为浮点数, 得到 {value} (位于 {section})")
-                elif expected_type is bool:
-                    setattr(self.config, key, self.ini_value_to_bool(value))
-                elif expected_type is str:
-                    setattr(self.config, key, value)
-                else:
-                    errors.append(f"内部错误: {key} 具有未知类型 {expected_type} (位于 {section}), 请联系开发者")
+                    expected_type = field_types[key]
+                    if expected_type is int:
+                        try:
+                            setattr(self.config, key, int(value))
+                        except ValueError:
+                            errors.append(f"类型无效: {key} 应为整数, 得到 {value} (位于 {section})")
+                    elif expected_type is float:
+                        try:
+                            setattr(self.config, key, float(value))
+                        except ValueError:
+                            errors.append(f"类型无效: {key} 应为浮点数, 得到 {value} (位于 {section})")
+                    elif expected_type is bool:
+                        setattr(self.config, key, self.ini_value_to_bool(value))
+                    elif expected_type is str:
+                        setattr(self.config, key, value)
+                    else:
+                        errors.append(f"内部错误: {key} 具有未知类型 {expected_type} (位于 {section}), 请联系开发者")
+                except Exception as e:
+                    errors.append(f"读取配置错误: {key} (位于 {section}) {value=}  {str(e)}")
+        setattr(self.config, "unknown_fields", unknown_fields)
         return "\n\t".join(errors)
 
     @staticmethod
@@ -98,6 +104,10 @@ class ConfigManager(ManualConfig):
         for website in ManualConfig.SUPPORTED_WEBSITES:
             if url := getattr(cfg, f"{website}_website", ""):
                 parser.set("mdcx", f"{website}_website", url)
+        if x := getattr(cfg, "unknown_fields", {}):
+            parser.add_section("unknown_fields")
+            for key, value in x.items():
+                parser.set("unknown_fields", key, value)
         parser.write(buffer)
         return buffer.getvalue()
 
@@ -109,6 +119,10 @@ class ConfigManager(ManualConfig):
     def _get_config_path(self):
         if not os.path.exists(MARK_FILE):  # 标记文件不存在
             self.path = os.path.join(MAIN_PATH, "config.ini")  # 默认配置文件路径
+            # 确保 MARK_FILE 所在目录存在
+            mark_dir = os.path.dirname(MARK_FILE)
+            if mark_dir:
+                os.makedirs(mark_dir, exist_ok=True)
             with open(MARK_FILE, "w", encoding="UTF-8") as f:
                 f.write(self.path)
         else:
@@ -343,6 +357,16 @@ class ConfigSchema:
         """处理版本变更"""
         if self.version == ManualConfig.LOCAL_VERSION:
             return
+        # 1. 处理移除的配置项, 其将储存在 unknown_fields 中
+        unknown_fields: dict[str, str] = getattr(self, "unknown_fields", {})
+        if "pic_name" in unknown_fields:  # 重命名为 pic_simple_name
+            self.pic_simple_name = ConfigManager.ini_value_to_bool(unknown_fields["pic_name"])
+            del unknown_fields["pic_name"]
+        if "trailer_name" in unknown_fields:  # 重命名为 trailer_simple_name
+            self.trailer_simple_name = ConfigManager.ini_value_to_bool(unknown_fields["trailer_name"])
+            del unknown_fields["trailer_name"]
+        if "modified_time" in unknown_fields:  # 弃用
+            del unknown_fields["modified_time"]
 
     def init(self):
         self._update()
