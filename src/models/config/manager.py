@@ -5,12 +5,21 @@ from configparser import ConfigParser, RawConfigParser
 from dataclasses import dataclass, fields
 from io import StringIO
 
-from ..base.utils import get_random_headers, get_user_agent, singleton
+from ..base.utils import get_random_headers, get_user_agent
 from .consts import MAIN_PATH, MARK_FILE
 from .manual import ManualConfig
 
 
-@singleton
+def ini_value_to_bool(value: str) -> bool:
+    """将 ini 配置文件中的字符串值转换为布尔值"""
+    if value.lower() in ["true", "1", "yes", "on"]:
+        return True
+    elif value.lower() in ["false", "0", "no", "off"]:
+        return False
+    else:
+        return bool(value)
+
+
 class ConfigManager(ManualConfig):
     def __init__(self):
         self._get_config_path()
@@ -38,77 +47,59 @@ class ConfigManager(ManualConfig):
         with open(MARK_FILE, "w", encoding="UTF-8") as f:
             f.write(self.path)
         with open(self.path, "w", encoding="UTF-8") as f:
-            f.write(self.format_ini(self.config))
+            f.write(self.config.format_ini())
 
     def _read_file(self, path):
-        reader = RawConfigParser()
+        reader = RawConfigParser(interpolation=None)
         reader.read(path, encoding="UTF-8")
         field_types = {f.name: f.type for f in fields(ConfigSchema)}
         errors = []
+        unknown_fields = {}  # 原样保留未知字段
         for section in reader.sections():
             for key, value in reader.items(section):
-                if key not in field_types:
-                    # 特例处理: 支持自定义网站配置
-                    if key.endswith("_website") and key[:-8] in ManualConfig.SUPPORTED_WEBSITES and value:
-                        setattr(self.config, key, value)
+                try:
+                    if key not in field_types:
+                        # 特例处理: 支持自定义网站配置
+                        if key.endswith("_website") and key[:-8] in ManualConfig.SUPPORTED_WEBSITES and value:
+                            setattr(self.config, key, value)
+                            continue
+                        unknown_fields[key] = value
+                        errors.append(f"未知配置: {key} (位于 {section})")
                         continue
-                    errors.append(f"未知配置: {key} (位于 {section})")
-                    continue
-                expected_type = field_types[key]
-                if expected_type is int:
-                    try:
-                        setattr(self.config, key, int(value))
-                    except ValueError:
-                        errors.append(f"类型无效: {key} 应为整数, 得到 {value} (位于 {section})")
-                elif expected_type is float:
-                    try:
-                        setattr(self.config, key, float(value))
-                    except ValueError:
-                        errors.append(f"类型无效: {key} 应为浮点数, 得到 {value} (位于 {section})")
-                elif expected_type is bool:
-                    setattr(self.config, key, self.ini_value_to_bool(value))
-                elif expected_type is str:
-                    setattr(self.config, key, value)
-                else:
-                    errors.append(f"内部错误: {key} 具有未知类型 {expected_type} (位于 {section}), 请联系开发者")
+                    expected_type = field_types[key]
+                    if expected_type is int:
+                        try:
+                            setattr(self.config, key, int(value))
+                        except ValueError:
+                            errors.append(f"类型无效: {key} 应为整数, 得到 {value} (位于 {section})")
+                    elif expected_type is float:
+                        try:
+                            setattr(self.config, key, float(value))
+                        except ValueError:
+                            errors.append(f"类型无效: {key} 应为浮点数, 得到 {value} (位于 {section})")
+                    elif expected_type is bool:
+                        setattr(self.config, key, ini_value_to_bool(value))
+                    elif expected_type is str:
+                        setattr(self.config, key, value)
+                    else:
+                        errors.append(f"内部错误: {key} 具有未知类型 {expected_type} (位于 {section}), 请联系开发者")
+                except Exception as e:
+                    errors.append(f"读取配置错误: {key} (位于 {section}) {value=}  {str(e)}")
+        setattr(self.config, "unknown_fields", unknown_fields)
         return "\n\t".join(errors)
-
-    @staticmethod
-    def ini_value_to_bool(value: str) -> bool:
-        """将 ini 配置文件中的字符串值转换为布尔值"""
-        if value.lower() in ["true", "1", "yes", "on"]:
-            return True
-        elif value.lower() in ["false", "0", "no", "off"]:
-            return False
-        else:
-            return bool(value)
-
-    @staticmethod
-    def format_ini(cfg: "ConfigSchema"):
-        buffer = StringIO()
-        parser = ConfigParser()
-        parser.add_section("mdcx")
-        for field in fields(cfg):
-            value = getattr(cfg, field.name)
-            if isinstance(value, bool):
-                value = "true" if value else "false"
-            else:
-                value = str(value)
-            parser.set("mdcx", field.name, value)
-        for website in ManualConfig.SUPPORTED_WEBSITES:
-            if url := getattr(cfg, f"{website}_website", ""):
-                parser.set("mdcx", f"{website}_website", url)
-        parser.write(buffer)
-        return buffer.getvalue()
 
     def init_config(self):
         """写入默认配置"""
         with open(self.path, "w", encoding="UTF-8") as f:
-            f.write(self.format_ini(ConfigSchema()))
+            f.write(ConfigSchema().format_ini())
 
     def _get_config_path(self):
         if not os.path.exists(MARK_FILE):  # 标记文件不存在
             self.path = os.path.join(MAIN_PATH, "config.ini")  # 默认配置文件路径
+            # 确保 MARK_FILE 所在目录存在
+            mark_dir = os.path.dirname(MARK_FILE)
+            if mark_dir:
+                os.makedirs(mark_dir, exist_ok=True)
             with open(MARK_FILE, "w", encoding="UTF-8") as f:
                 f.write(self.path)
         else:
@@ -256,7 +247,7 @@ class ConfigSchema:
     naming_media: str = r"number title"
     prevent_char: str = r""
     fields_rule: str = r"del_actor,del_char,"
-    suffix_sort: str = r"mosaic,cnword,definition"
+    suffix_sort: str = r"moword,cnword,definition"
     actor_no_name: str = r"未知演员"
     release_rule: str = r"YYYY-MM-DD"
     folder_name_max: int = 60
@@ -343,6 +334,16 @@ class ConfigSchema:
         """处理版本变更"""
         if self.version == ManualConfig.LOCAL_VERSION:
             return
+        # 1. 处理移除的配置项, 其将储存在 unknown_fields 中
+        unknown_fields: dict[str, str] = getattr(self, "unknown_fields", {})
+        if "pic_name" in unknown_fields:  # 重命名为 pic_simple_name
+            self.pic_simple_name = ini_value_to_bool(unknown_fields["pic_name"])
+            del unknown_fields["pic_name"]
+        if "trailer_name" in unknown_fields:  # 重命名为 trailer_simple_name
+            self.trailer_simple_name = ini_value_to_bool(unknown_fields["trailer_name"])
+            del unknown_fields["trailer_name"]
+        if "modified_time" in unknown_fields:  # 弃用
+            del unknown_fields["modified_time"]
 
     def init(self):
         self._update()
@@ -435,14 +436,36 @@ class ConfigSchema:
         self.official_websites = official_websites_dic
 
         # 字段命名规则-后缀字段顺序
-        all_str_list = ["mosaic", "cnword", "definition"]
+        all_str_list = ["moword", "cnword", "definition"]
         read_str_list = re.split(r"[,，]", self.suffix_sort)
+        read_str_list = [i1.replace("mosaic", "moword") for i1 in read_str_list]  # 更新旧版的mosaic为moword，避免旧配置出错
         new_str_list1 = [i1 for i1 in read_str_list if i1 in all_str_list]  # 去除不在list中的字符
         new_str_list = []
         [new_str_list.append(i1) for i1 in new_str_list1 if i1 not in new_str_list]  # 去重
         [new_str_list.append(i1) for i1 in all_str_list if i1 not in new_str_list]  # 补全
         new_str = ",".join(new_str_list)
         self.suffix_sort = new_str
+
+    def format_ini(self):
+        buffer = StringIO()
+        parser = ConfigParser(interpolation=None)
+        parser.add_section("mdcx")
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            else:
+                value = str(value)
+            parser.set("mdcx", field.name, value)
+        for website in ManualConfig.SUPPORTED_WEBSITES:
+            if url := getattr(self, f"{website}_website", ""):
+                parser.set("mdcx", f"{website}_website", url)
+        if x := getattr(self, "unknown_fields", {}):
+            parser.add_section("unknown_fields")
+            for key, value in x.items():
+                parser.set("unknown_fields", key, value)
+        parser.write(buffer)
+        return buffer.getvalue()
 
 
 manager = ConfigManager()
